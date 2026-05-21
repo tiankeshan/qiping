@@ -1,0 +1,144 @@
+version: '3.8'
+
+services:
+  # ==================== PostgreSQL 数据库 ====================
+  postgres:
+    image: postgres:16-alpine
+    container_name: qiping_postgres
+    environment:
+      POSTGRES_USER: qiping_user
+      POSTGRES_PASSWORD: qiping_password
+      POSTGRES_DB: qiping_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qiping_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - qiping_network
+
+  # ==================== Redis 缓存 ====================
+  redis:
+    image: redis:7-alpine
+    container_name: qiping_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - qiping_network
+
+  # ==================== FastAPI 后端 ====================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: qiping_backend
+    environment:
+      DATABASE_URL: postgresql://qiping_user:qiping_password@postgres:5432/qiping_db
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      DEBUG: "True"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - qiping_network
+
+  # ==================== Celery Worker (异步任务) ====================
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: qiping_celery_worker
+    environment:
+      DATABASE_URL: postgresql://qiping_user:qiping_password@postgres:5432/qiping_db
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      - postgres
+      - redis
+      - backend
+    command: celery -A tasks worker --loglevel=info
+    networks:
+      - qiping_network
+
+  # ==================== Celery Beat (定时任务) ====================
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: qiping_celery_beat
+    environment:
+      DATABASE_URL: postgresql://qiping_user:qiping_password@postgres:5432/qiping_db
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      - postgres
+      - redis
+    command: celery -A tasks beat --loglevel=info
+    networks:
+      - qiping_network
+
+  # ==================== React 前端 ====================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: qiping_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      REACT_APP_API_URL: http://localhost:8000
+      REACT_APP_WS_URL: ws://localhost:8000
+    volumes:
+      - ./frontend/src:/app/src
+    depends_on:
+      - backend
+    networks:
+      - qiping_network
+
+  # ==================== Nginx 反向代理 ====================
+  nginx:
+    image: nginx:alpine
+    container_name: qiping_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - qiping_network
+
+# ==================== 网络 ====================
+networks:
+  qiping_network:
+    driver: bridge
+
+# ==================== 数据卷 ====================
+volumes:
+  postgres_data:
+  redis_data:
